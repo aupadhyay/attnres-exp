@@ -15,6 +15,8 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from model_attnres import DepthAttention
+
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -114,6 +116,9 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
+    # AttnRes config
+    residual_mode: str = 'baseline'  # 'baseline', 'full_attnres', 'block_attnres'
+    attnres_n_blocks: int = 4  # number of blocks for block_attnres
 
 class GPT(nn.Module):
 
@@ -130,6 +135,23 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
+        # AttnRes: create depth attention modules
+        if config.residual_mode == 'full_attnres':
+            # One DepthAttention per layer (layer l attends over outputs 0..l)
+            self.depth_attn = nn.ModuleList([
+                DepthAttention(config.n_embd, layer_idx=i)
+                for i in range(config.n_layer)
+            ])
+        elif config.residual_mode == 'block_attnres':
+            assert config.n_layer % config.attnres_n_blocks == 0, \
+                f"n_layer ({config.n_layer}) must be divisible by attnres_n_blocks ({config.attnres_n_blocks})"
+            self.layers_per_block = config.n_layer // config.attnres_n_blocks
+            # One DepthAttention per block boundary (block b attends over block outputs 0..b)
+            self.depth_attn = nn.ModuleList([
+                DepthAttention(config.n_embd, layer_idx=i)
+                for i in range(config.attnres_n_blocks)
+            ])
+
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -177,8 +199,38 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        for block in self.transformer.h:
-            x = block(x)
+
+        if self.config.residual_mode == 'baseline':
+            for block in self.transformer.h:
+                x = block(x)
+
+        elif self.config.residual_mode == 'full_attnres':
+            # Store all layer outputs for depth attention
+            layer_outputs = [x]  # output 0 = embedding
+            for i, block in enumerate(self.transformer.h):
+                # Each sub-layer (attn, mlp) produces an output
+                # We treat the full block output as one "layer output"
+                block_out = block.attn(block.ln_1(x))
+                x_after_attn = x + block_out
+                mlp_out = block.mlp(block.ln_2(x_after_attn))
+                layer_out = x_after_attn + mlp_out
+                layer_outputs.append(layer_out)
+                # Depth attention: aggregate all outputs so far
+                x = self.depth_attn[i](layer_outputs)
+
+        elif self.config.residual_mode == 'block_attnres':
+            block_outputs = [x]  # block 0 input = embedding
+            layers_per_block = self.layers_per_block
+            for block_idx in range(self.config.attnres_n_blocks):
+                # Intra-block: standard residual accumulation
+                start = block_idx * layers_per_block
+                end = start + layers_per_block
+                for layer in self.transformer.h[start:end]:
+                    x = layer(x)
+                block_outputs.append(x)
+                # Inter-block: depth attention over block representations
+                x = self.depth_attn[block_idx](block_outputs)
+
         x = self.transformer.ln_f(x)
 
         if targets is not None:
@@ -229,6 +281,8 @@ class GPT(nn.Module):
             config_args['dropout'] = override_args['dropout']
         # create a from-scratch initialized minGPT model
         config = GPTConfig(**config_args)
+        assert config.residual_mode == 'baseline', \
+            "from_pretrained only supports baseline residual_mode (pretrained weights have no depth_attn params)"
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
