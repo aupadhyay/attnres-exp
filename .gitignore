@@ -1,0 +1,9 @@
+out-*/
+*.bin
+figures/
+checkpoints/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+wandb/
