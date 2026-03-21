@@ -28,12 +28,15 @@ def extract_dynamics(model: GPT, input_ids: torch.Tensor, targets: torch.Tensor)
     block_outputs = []
     hooks = []
 
-    # Register forward hooks on each Block to capture its output
+    # Register forward hooks on each Block's MLP to capture its output.
+    # We hook the MLP (not the Block) because in full_attnres mode,
+    # block.forward() is never called — sub-layers are called individually.
+    # The MLP is the last sub-layer in every mode, so its output fires reliably.
     for i, block in enumerate(model.transformer.h):
         def hook_fn(module, input, output, idx=i):
             output.retain_grad()
             block_outputs.append(output)
-        hooks.append(block.register_forward_hook(hook_fn))
+        hooks.append(block.mlp.register_forward_hook(hook_fn))
 
     # Forward + backward through the actual model (uses correct residual_mode)
     logits, loss = model(input_ids, targets)
@@ -70,7 +73,13 @@ def main():
     ckpt = torch.load(args.ckpt, map_location=device)
     config = GPTConfig(**ckpt["model_args"])
     model = GPT(config)
-    model.load_state_dict(ckpt["model"])
+    # Strip _orig_mod. prefix from torch.compile'd checkpoints
+    state_dict = ckpt["model"]
+    unwanted_prefix = '_orig_mod.'
+    for k in list(state_dict.keys()):
+        if k.startswith(unwanted_prefix):
+            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+    model.load_state_dict(state_dict)
     model.to(device)
 
     all_output_mags = []

@@ -53,40 +53,49 @@ def train(variant: str = "baseline"):
         shutil.rmtree(work_dir)
     shutil.copytree("/data/nanoGPT", work_dir)
 
-    # Ensure data is prepared
+    # Ensure data is available — check volume cache first, then prepare if needed
     data_dir = os.path.join(work_dir, "data", "openwebtext")
-    if not os.path.exists(os.path.join(data_dir, "train.bin")):
+    if os.path.exists("/data/openwebtext/train.bin"):
+        print("Using cached data from volume")
+        shutil.copy2("/data/openwebtext/train.bin", os.path.join(data_dir, "train.bin"))
+        shutil.copy2("/data/openwebtext/val.bin", os.path.join(data_dir, "val.bin"))
+    elif not os.path.exists(os.path.join(data_dir, "train.bin")):
         print("Preparing OpenWebText data...")
         subprocess.run(
             ["python", "prepare.py"],
             cwd=data_dir,
             check=True,
         )
-        # Cache prepared data back to volume
         vol.commit()
 
+    # Point output dir directly at the persistent volume so checkpoints
+    # survive even if the container dies mid-training
+    dest_dir = f"/data/checkpoints/{variant}"
+    os.makedirs(dest_dir, exist_ok=True)
+
+    # Auto-resume if a checkpoint exists from a previous run
+    has_checkpoint = os.path.exists(os.path.join(dest_dir, "ckpt.pt"))
+    init_from = "resume" if has_checkpoint else "scratch"
+    if has_checkpoint:
+        print(f"Found existing checkpoint in {dest_dir}, resuming training")
+
     config = VARIANT_TO_CONFIG[variant]
-    print(f"Starting training: {variant} ({config})")
+    print(f"Starting training: {variant} ({config}), init_from={init_from}")
 
     result = subprocess.run(
-        ["python", "train.py", config],
+        ["python", "train.py", config,
+         f"--out_dir={dest_dir}", f"--init_from={init_from}"],
         cwd=work_dir,
         check=True,
     )
 
-    # Copy checkpoints to persistent volume
-    out_dir = os.path.join(work_dir, VARIANT_TO_OUTDIR[variant])
-    dest_dir = f"/data/checkpoints/{variant}"
-    if os.path.exists(out_dir):
-        shutil.copytree(out_dir, dest_dir, dirs_exist_ok=True)
-        vol.commit()
-        print(f"Checkpoints saved to {dest_dir}")
+    vol.commit()
+    print(f"Training complete. Checkpoints at {dest_dir}")
 
 
 @app.function(
     image=image,
-    gpu="A100",
-    timeout=30 * 60,
+    timeout=60 * 60,
     volumes={"/data": vol},
 )
 def prepare_data():

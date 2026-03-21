@@ -289,7 +289,7 @@ while True:
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
         # Save periodic checkpoints for dynamics analysis
-        if iter_num > 0 and iter_num % 10000 == 0:
+        if iter_num > 0 and iter_num % 2500 == 0:
             dynamics_ckpt = {
                 'model': raw_model.state_dict(),
                 'model_args': model_args,
