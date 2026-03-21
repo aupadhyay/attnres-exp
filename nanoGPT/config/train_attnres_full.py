@@ -9,12 +9,12 @@ out_dir = 'out-attnres-full'
 
 batch_size = 12
 block_size = 1024
-gradient_accumulation_steps = 40
+gradient_accumulation_steps = 5
 
-max_iters = 100000
-lr_decay_iters = 100000
+max_iters = 10000
+lr_decay_iters = 10000
 
-eval_interval = 500
+eval_interval = 250
 eval_iters = 200
 log_interval = 10
 
