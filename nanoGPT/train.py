@@ -55,8 +55,15 @@ n_embd = 768
 dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # attnres
-residual_mode = 'baseline'  # 'baseline', 'full_attnres', 'block_attnres'
+residual_mode = 'baseline'  # 'baseline', 'full_attnres', 'block_attnres', 'adaptive_attnres'
 attnres_n_blocks = 4  # for block_attnres variant
+# adaptive boundaries
+boundary_tau_start = 5.0
+boundary_tau_end = 0.1
+boundary_anneal_start_frac = 0.2
+boundary_anneal_end_frac = 0.7
+boundary_n_target = 4
+boundary_reg_lambda = 0.1
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -149,7 +156,11 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout,
-                  residual_mode=residual_mode, attnres_n_blocks=attnres_n_blocks)
+                  residual_mode=residual_mode, attnres_n_blocks=attnres_n_blocks,
+                  boundary_tau_start=boundary_tau_start, boundary_tau_end=boundary_tau_end,
+                  boundary_anneal_start_frac=boundary_anneal_start_frac,
+                  boundary_anneal_end_frac=boundary_anneal_end_frac,
+                  boundary_n_target=boundary_n_target, boundary_reg_lambda=boundary_reg_lambda)
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -167,7 +178,9 @@ elif init_from == 'resume':
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'residual_mode', 'attnres_n_blocks']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'residual_mode', 'attnres_n_blocks',
+              'boundary_tau_start', 'boundary_tau_end', 'boundary_anneal_start_frac',
+              'boundary_anneal_end_frac', 'boundary_n_target', 'boundary_reg_lambda']:
         model_args[k] = checkpoint_model_args[k]
     # create the model
     gptconf = GPTConfig(**model_args)
@@ -268,13 +281,23 @@ while True:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
-            wandb.log({
+            log_dict = {
                 "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
-            })
+            }
+            if raw_model.config.residual_mode == 'adaptive_attnres':
+                tau = raw_model._get_boundary_tau()
+                gates = torch.sigmoid(raw_model.boundary_logits.detach() / tau)
+                log_dict.update({
+                    "boundary/tau": tau,
+                    "boundary/n_effective": gates.sum().item(),
+                    "boundary/reg_loss": raw_model._boundary_reg_loss.item() if hasattr(raw_model, '_boundary_reg_loss') else 0,
+                    **{f"boundary/gate_{i}": g.item() for i, g in enumerate(gates)},
+                })
+            wandb.log(log_dict)
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
@@ -305,6 +328,10 @@ while True:
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
+    # Update training progress for adaptive boundaries
+    if hasattr(raw_model, 'boundary_logits'):
+        raw_model._current_train_frac = iter_num / max_iters
+
     for micro_step in range(gradient_accumulation_steps):
         if ddp:
             # in DDP training we only need to sync gradients at the last micro step.
