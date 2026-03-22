@@ -16,6 +16,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 from model_attnres import DepthAttention
+from model_moe import MoEMLP
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -100,12 +101,21 @@ class Block(nn.Module):
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
+        self.use_moe = config.use_moe
+        if config.use_moe:
+            self.moe = MoEMLP(config)
+        else:
+            self.mlp = MLP(config)
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
-        return x
+        if self.use_moe:
+            moe_out, aux_loss = self.moe(self.ln_2(x))
+            x = x + moe_out
+            return x, aux_loss
+        else:
+            x = x + self.mlp(self.ln_2(x))
+            return x
 
 @dataclass
 class GPTConfig:
@@ -119,6 +129,11 @@ class GPTConfig:
     # AttnRes config
     residual_mode: str = 'baseline'  # 'baseline', 'full_attnres', 'block_attnres'
     attnres_n_blocks: int = 4  # number of blocks for block_attnres
+    # MoE config
+    use_moe: bool = False
+    num_experts: int = 8
+    moe_top_k: int = 2
+    moe_aux_loss_coeff: float = 0.01
 
 class GPT(nn.Module):
 
@@ -200,20 +215,31 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
 
+        total_aux_loss = 0.0
+
         if self.config.residual_mode == 'baseline':
             for block in self.transformer.h:
-                x = block(x)
+                if self.config.use_moe:
+                    x, aux_loss = block(x)
+                    total_aux_loss = total_aux_loss + aux_loss
+                else:
+                    x = block(x)
 
         elif self.config.residual_mode == 'full_attnres':
             # Store all layer outputs for depth attention
             layer_outputs = [x]  # output 0 = embedding
             for i, block in enumerate(self.transformer.h):
-                # Each sub-layer (attn, mlp) produces an output
+                # Each sub-layer (attn, mlp/moe) produces an output
                 # We treat the full block output as one "layer output"
                 block_out = block.attn(block.ln_1(x))
                 x_after_attn = x + block_out
-                mlp_out = block.mlp(block.ln_2(x_after_attn))
-                layer_out = x_after_attn + mlp_out
+                if self.config.use_moe:
+                    moe_out, aux_loss = block.moe(block.ln_2(x_after_attn))
+                    layer_out = x_after_attn + moe_out
+                    total_aux_loss = total_aux_loss + aux_loss
+                else:
+                    mlp_out = block.mlp(block.ln_2(x_after_attn))
+                    layer_out = x_after_attn + mlp_out
                 layer_outputs.append(layer_out)
                 # Depth attention: aggregate all outputs so far
                 x = self.depth_attn[i](layer_outputs)
@@ -226,7 +252,11 @@ class GPT(nn.Module):
                 start = block_idx * layers_per_block
                 end = start + layers_per_block
                 for layer in self.transformer.h[start:end]:
-                    x = layer(x)
+                    if self.config.use_moe:
+                        x, aux_loss = layer(x)
+                        total_aux_loss = total_aux_loss + aux_loss
+                    else:
+                        x = layer(x)
                 block_outputs.append(x)
                 # Inter-block: depth attention over block representations
                 x = self.depth_attn[block_idx](block_outputs)
@@ -237,6 +267,8 @@ class GPT(nn.Module):
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if self.config.use_moe:
+                loss = loss + total_aux_loss
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
