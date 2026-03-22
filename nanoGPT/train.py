@@ -57,6 +57,11 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 # attnres
 residual_mode = 'baseline'  # 'baseline', 'full_attnres', 'block_attnres'
 attnres_n_blocks = 4  # for block_attnres variant
+# moe
+use_moe = False
+num_experts = 8
+moe_top_k = 2
+moe_aux_loss_coeff = 0.01
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -149,7 +154,9 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout,
-                  residual_mode=residual_mode, attnres_n_blocks=attnres_n_blocks)
+                  residual_mode=residual_mode, attnres_n_blocks=attnres_n_blocks,
+                  use_moe=use_moe, num_experts=num_experts,
+                  moe_top_k=moe_top_k, moe_aux_loss_coeff=moe_aux_loss_coeff)
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -167,7 +174,9 @@ elif init_from == 'resume':
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'residual_mode', 'attnres_n_blocks']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size',
+              'residual_mode', 'attnres_n_blocks',
+              'use_moe', 'num_experts', 'moe_top_k', 'moe_aux_loss_coeff']:
         model_args[k] = checkpoint_model_args[k]
     # create the model
     gptconf = GPTConfig(**model_args)
