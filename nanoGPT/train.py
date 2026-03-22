@@ -57,6 +57,9 @@ bias = False # do we use bias inside LayerNorm and Linear layers?
 # attnres
 residual_mode = 'baseline'  # 'baseline', 'full_attnres', 'block_attnres'
 attnres_n_blocks = 4  # for block_attnres variant
+# gated blocks
+use_gated_blocks = False
+gate_init_bias = 2.0
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -149,7 +152,8 @@ if os.path.exists(meta_path):
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
                   bias=bias, vocab_size=None, dropout=dropout,
-                  residual_mode=residual_mode, attnres_n_blocks=attnres_n_blocks)
+                  residual_mode=residual_mode, attnres_n_blocks=attnres_n_blocks,
+                  use_gated_blocks=use_gated_blocks, gate_init_bias=gate_init_bias)
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -167,7 +171,7 @@ elif init_from == 'resume':
     checkpoint_model_args = checkpoint['model_args']
     # force these config attributes to be equal otherwise we can't even resume training
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'residual_mode', 'attnres_n_blocks']:
+    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'residual_mode', 'attnres_n_blocks', 'use_gated_blocks', 'gate_init_bias']:
         model_args[k] = checkpoint_model_args[k]
     # create the model
     gptconf = GPTConfig(**model_args)
@@ -268,13 +272,23 @@ while True:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:
-            wandb.log({
+            log_dict = {
                 "iter": iter_num,
                 "train/loss": losses['train'],
                 "val/loss": losses['val'],
                 "lr": lr,
                 "mfu": running_mfu*100, # convert to percentage
-            })
+            }
+            # Log per-layer gate activations when using gated blocks
+            if raw_model.config.use_gated_blocks:
+                for i, block in enumerate(raw_model.transformer.h):
+                    if hasattr(block, 'gate_logit'):
+                        gate_vals = torch.sigmoid(block.gate_logit.detach() + block.gate_bias)
+                        log_dict[f"gates/layer_{i}_mean"] = gate_vals.mean().item()
+                        log_dict[f"gates/layer_{i}_min"] = gate_vals.min().item()
+                        log_dict[f"gates/layer_{i}_max"] = gate_vals.max().item()
+                        log_dict[f"gates/layer_{i}_std"] = gate_vals.std().item()
+            wandb.log(log_dict, step=iter_num)
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
