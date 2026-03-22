@@ -101,11 +101,26 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
+        # Per-layer output gate for gated block AttnRes
+        self.use_gate = config.use_gated_blocks
+        if config.use_gated_blocks:
+            self.gate_logit = nn.Parameter(torch.zeros(config.n_embd))
+            self.gate_bias = config.gate_init_bias
 
     def forward(self, x):
         x = x + self.attn(self.ln_1(x))
         x = x + self.mlp(self.ln_2(x))
         return x
+
+    def forward_gated(self, x):
+        """Forward pass returning gated output for block accumulation.
+        Gates the residual contribution (h - x), so a closed gate = skip connection."""
+        h = x + self.attn(self.ln_1(x))
+        h = h + self.mlp(self.ln_2(h))
+        if self.use_gate:
+            gate = torch.sigmoid(self.gate_logit + self.gate_bias)  # (d,)
+            return x + gate * (h - x)
+        return h
 
 @dataclass
 class GPTConfig:
@@ -119,6 +134,9 @@ class GPTConfig:
     # AttnRes config
     residual_mode: str = 'baseline'  # 'baseline', 'full_attnres', 'block_attnres'
     attnres_n_blocks: int = 4  # number of blocks for block_attnres
+    # Gated block config
+    use_gated_blocks: bool = False
+    gate_init_bias: float = 2.0
 
 class GPT(nn.Module):
 
@@ -222,11 +240,14 @@ class GPT(nn.Module):
             block_outputs = [x]  # block 0 input = embedding
             layers_per_block = self.layers_per_block
             for block_idx in range(self.config.attnres_n_blocks):
-                # Intra-block: standard residual accumulation
+                # Intra-block: standard residual accumulation (with optional gating)
                 start = block_idx * layers_per_block
                 end = start + layers_per_block
                 for layer in self.transformer.h[start:end]:
-                    x = layer(x)
+                    if self.config.use_gated_blocks:
+                        x = layer.forward_gated(x)
+                    else:
+                        x = layer(x)
                 block_outputs.append(x)
                 # Inter-block: depth attention over block representations
                 x = self.depth_attn[block_idx](block_outputs)
