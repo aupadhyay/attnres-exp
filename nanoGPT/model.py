@@ -117,8 +117,15 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     # AttnRes config
-    residual_mode: str = 'baseline'  # 'baseline', 'full_attnres', 'block_attnres'
+    residual_mode: str = 'baseline'  # 'baseline', 'full_attnres', 'block_attnres', 'adaptive_attnres'
     attnres_n_blocks: int = 4  # number of blocks for block_attnres
+    # Adaptive boundary config
+    boundary_tau_start: float = 5.0
+    boundary_tau_end: float = 0.1
+    boundary_anneal_start_frac: float = 0.2
+    boundary_anneal_end_frac: float = 0.7
+    boundary_n_target: int = 4
+    boundary_reg_lambda: float = 0.1
 
 class GPT(nn.Module):
 
@@ -150,6 +157,15 @@ class GPT(nn.Module):
             self.depth_attn = nn.ModuleList([
                 DepthAttention(config.n_embd, layer_idx=i)
                 for i in range(config.attnres_n_blocks)
+            ])
+        elif config.residual_mode == 'adaptive_attnres':
+            # Learnable boundary logits for layers 1..n_layer-1
+            # Initialized to -2 so sigmoid(-2/5) ≈ 0.4 — boundaries mostly closed at start
+            self.boundary_logits = nn.Parameter(torch.full((config.n_layer - 1,), -2.0))
+            # Max possible blocks = n_layer (every layer could be a boundary)
+            self.depth_attn = nn.ModuleList([
+                DepthAttention(config.n_embd, layer_idx=i)
+                for i in range(config.n_layer)
             ])
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -231,18 +247,71 @@ class GPT(nn.Module):
                 # Inter-block: depth attention over block representations
                 x = self.depth_attn[block_idx](block_outputs)
 
+        elif self.config.residual_mode == 'adaptive_attnres':
+            tau = self._get_boundary_tau()
+            gates = torch.sigmoid(self.boundary_logits / tau)  # (n_layer-1,)
+
+            block_outputs = [x]  # initial embedding
+            partial_block = x    # running accumulation
+
+            for i, layer in enumerate(self.transformer.h):
+                x = layer(x)
+
+                if i == 0:
+                    # First layer always part of first block
+                    partial_block = x
+                else:
+                    gate = gates[i - 1]  # gate for boundary before layer i's output
+                    # Flush current partial block (weighted by gate)
+                    flushed = partial_block * gate
+                    if gate > 0.01:  # avoid empty blocks
+                        block_outputs.append(flushed)
+                    # Mix of fresh start (gate=1) and continuation (gate=0)
+                    partial_block = x * gate + (partial_block + x) * (1 - gate)
+
+            # Final block is whatever's accumulated
+            block_outputs.append(partial_block)
+
+            # Depth attention over variable-length block outputs
+            n_blocks = len(block_outputs)
+            x = self.depth_attn[min(n_blocks - 1, len(self.depth_attn) - 1)](block_outputs)
+
+            # Boundary regularization loss (added to main loss below)
+            self._boundary_reg_loss = self.config.boundary_reg_lambda * (
+                gates.sum() - self.config.boundary_n_target
+            ).pow(2)
+
         x = self.transformer.ln_f(x)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            if self.config.residual_mode == 'adaptive_attnres' and hasattr(self, '_boundary_reg_loss'):
+                loss = loss + self._boundary_reg_loss
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
 
         return logits, loss
+
+    def _get_boundary_tau(self):
+        """Compute temperature for boundary annealing based on current training progress."""
+        if not hasattr(self, '_current_train_frac'):
+            return self.config.boundary_tau_start
+        frac = self._current_train_frac
+        start_frac = self.config.boundary_anneal_start_frac
+        end_frac = self.config.boundary_anneal_end_frac
+        if frac < start_frac:
+            return self.config.boundary_tau_start
+        elif frac > end_frac:
+            return self.config.boundary_tau_end
+        else:
+            progress = (frac - start_frac) / (end_frac - start_frac)
+            return self.config.boundary_tau_start + progress * (
+                self.config.boundary_tau_end - self.config.boundary_tau_start
+            )
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
