@@ -30,7 +30,7 @@ class LayerNorm(nn.Module):
 
 class CausalSelfAttention(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=0):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -51,11 +51,40 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x):
+        # Value residual: layer 0 skips this (its V is already from token embeddings)
+        self.use_value_residual = config.use_value_residual and layer_idx > 0
+        if self.use_value_residual:
+            self.value_residual_mode = config.value_residual_mode
+            self.fixed_lambda = config.value_residual_fixed_lambda
+            if config.value_residual_mode == 'learnable_per_layer':
+                self.raw_lambda = nn.Parameter(
+                    torch.full((1,), config.value_residual_lambda_init)
+                )
+            elif config.value_residual_mode == 'learnable_per_head':
+                self.raw_lambda = nn.Parameter(
+                    torch.full((config.n_head,), config.value_residual_lambda_init)
+                )
+
+    def forward(self, x, v0=None):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+
+        # Apply value residual: mix current V with V_0 from token embeddings
+        if self.use_value_residual and v0 is not None:
+            if self.value_residual_mode == 'fixed':
+                lam = self.fixed_lambda
+            elif self.value_residual_mode == 'learnable_per_layer':
+                lam = torch.sigmoid(self.raw_lambda)  # scalar
+            elif self.value_residual_mode == 'learnable_per_head':
+                lam = torch.sigmoid(self.raw_lambda)  # (n_head,)
+                # Reshape for broadcasting: (n_head,) -> (1, 1, n_head, 1) after v is reshaped,
+                # but we apply before reshape so expand to (1, 1, n_head * head_dim)
+                head_dim = C // self.n_head
+                lam = lam.repeat_interleave(head_dim)  # (n_embd,)
+            v = (1 - lam) * v + lam * v0
+
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -95,15 +124,15 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=0):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
+        self.attn = CausalSelfAttention(config, layer_idx=layer_idx)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, v0=None):
+        x = x + self.attn(self.ln_1(x), v0=v0)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -126,6 +155,11 @@ class GPTConfig:
     boundary_anneal_end_frac: float = 0.7
     boundary_n_target: int = 4
     boundary_reg_lambda: float = 0.1
+    # Value residual config
+    use_value_residual: bool = False
+    value_residual_mode: str = 'learnable_per_layer'  # 'fixed', 'learnable_per_layer', 'learnable_per_head'
+    value_residual_lambda_init: float = 0.0  # sigmoid(0) = 0.5
+    value_residual_fixed_lambda: float = 0.5  # used when mode='fixed'
 
 class GPT(nn.Module):
 
@@ -139,7 +173,7 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config, layer_idx=i) for i in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         # AttnRes: create depth attention modules
@@ -167,6 +201,10 @@ class GPT(nn.Module):
                 DepthAttention(config.n_embd, layer_idx=i)
                 for i in range(config.n_layer)
             ])
+
+        # Value residual: projection for initial token embeddings -> V_0
+        if config.use_value_residual:
+            self.v0_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
@@ -216,9 +254,15 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
 
+        # Compute V_0 for value residual learning: project raw token embeddings
+        # into value space once, then pass to every layer so they can mix it in
+        v0 = None
+        if self.config.use_value_residual:
+            v0 = self.v0_proj(tok_emb)  # (B, T, n_embd)
+
         if self.config.residual_mode == 'baseline':
             for block in self.transformer.h:
-                x = block(x)
+                x = block(x, v0=v0)
 
         elif self.config.residual_mode == 'full_attnres':
             # Store all layer outputs for depth attention
@@ -226,7 +270,7 @@ class GPT(nn.Module):
             for i, block in enumerate(self.transformer.h):
                 # Each sub-layer (attn, mlp) produces an output
                 # We treat the full block output as one "layer output"
-                block_out = block.attn(block.ln_1(x))
+                block_out = block.attn(block.ln_1(x), v0=v0)
                 x_after_attn = x + block_out
                 mlp_out = block.mlp(block.ln_2(x_after_attn))
                 layer_out = x_after_attn + mlp_out
@@ -242,7 +286,7 @@ class GPT(nn.Module):
                 start = block_idx * layers_per_block
                 end = start + layers_per_block
                 for layer in self.transformer.h[start:end]:
-                    x = layer(x)
+                    x = layer(x, v0=v0)
                 block_outputs.append(x)
                 # Inter-block: depth attention over block representations
                 x = self.depth_attn[block_idx](block_outputs)
@@ -255,7 +299,7 @@ class GPT(nn.Module):
             partial_block = x    # running accumulation
 
             for i, layer in enumerate(self.transformer.h):
-                x = layer(x)
+                x = layer(x, v0=v0)
 
                 if i == 0:
                     # First layer always part of first block

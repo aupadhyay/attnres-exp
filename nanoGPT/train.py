@@ -64,6 +64,11 @@ boundary_anneal_start_frac = 0.2
 boundary_anneal_end_frac = 0.7
 boundary_n_target = 4
 boundary_reg_lambda = 0.1
+# value residual
+use_value_residual = False
+value_residual_mode = 'learnable_per_layer'  # 'fixed', 'learnable_per_layer', 'learnable_per_head'
+value_residual_lambda_init = 0.0  # sigmoid(0) = 0.5
+value_residual_fixed_lambda = 0.5  # used when mode='fixed'
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
 max_iters = 600000 # total number of training iterations
@@ -160,7 +165,11 @@ model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=bloc
                   boundary_tau_start=boundary_tau_start, boundary_tau_end=boundary_tau_end,
                   boundary_anneal_start_frac=boundary_anneal_start_frac,
                   boundary_anneal_end_frac=boundary_anneal_end_frac,
-                  boundary_n_target=boundary_n_target, boundary_reg_lambda=boundary_reg_lambda)
+                  boundary_n_target=boundary_n_target, boundary_reg_lambda=boundary_reg_lambda,
+                  use_value_residual=use_value_residual,
+                  value_residual_mode=value_residual_mode,
+                  value_residual_lambda_init=value_residual_lambda_init,
+                  value_residual_fixed_lambda=value_residual_fixed_lambda)
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -180,7 +189,8 @@ elif init_from == 'resume':
     # the rest of the attributes (e.g. dropout) can stay as desired from command line
     for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size', 'residual_mode', 'attnres_n_blocks',
               'boundary_tau_start', 'boundary_tau_end', 'boundary_anneal_start_frac',
-              'boundary_anneal_end_frac', 'boundary_n_target', 'boundary_reg_lambda']:
+              'boundary_anneal_end_frac', 'boundary_n_target', 'boundary_reg_lambda',
+              'use_value_residual', 'value_residual_mode', 'value_residual_lambda_init', 'value_residual_fixed_lambda']:
         model_args[k] = checkpoint_model_args[k]
     # create the model
     gptconf = GPTConfig(**model_args)
@@ -297,7 +307,18 @@ while True:
                     "boundary/reg_loss": raw_model._boundary_reg_loss.item() if hasattr(raw_model, '_boundary_reg_loss') else 0,
                     **{f"boundary/gate_{i}": g.item() for i, g in enumerate(gates)},
                 })
-            wandb.log(log_dict)
+            # Log value residual lambda values per layer
+            if raw_model.config.use_value_residual:
+                for i, block in enumerate(raw_model.transformer.h):
+                    attn = block.attn
+                    if hasattr(attn, 'raw_lambda'):
+                        lam = torch.sigmoid(attn.raw_lambda.detach())
+                        if lam.numel() == 1:
+                            log_dict[f"value_residual/lambda_layer_{i}"] = lam.item()
+                        else:
+                            for h, val in enumerate(lam):
+                                log_dict[f"value_residual/lambda_layer_{i}_head_{h}"] = val.item()
+            wandb.log(log_dict, step=iter_num)
         if losses['val'] < best_val_loss or always_save_checkpoint:
             best_val_loss = losses['val']
             if iter_num > 0:
