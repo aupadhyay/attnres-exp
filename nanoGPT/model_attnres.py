@@ -38,7 +38,6 @@ class DepthAttention(nn.Module):
         self.key_norm = RMSNorm(dim)
         # Zero-init query: at init, all alphas are uniform (1/n_layers_so_far)
         self.w = nn.Parameter(torch.zeros(dim))
-        self.scale = dim ** -0.5
 
     def forward(self, layer_outputs: list[torch.Tensor]) -> torch.Tensor:
         """
@@ -53,16 +52,16 @@ class DepthAttention(nn.Module):
         # Compute keys via RMSNorm: (N, B, T, d)
         K = self.key_norm(V)
         # Compute logits: w^T @ k / sqrt(d) -> (N, B, T)
-        logits = torch.einsum('d, n b t d -> n b t', self.w, K) * self.scale
+        logits = torch.einsum("d, n b t d -> n b t", self.w, K)
         # Softmax over depth dimension
         alpha = torch.softmax(logits, dim=0)  # (N, B, T)
         # Weighted sum: (B, T, d)
-        out = torch.einsum('n b t, n b t d -> b t d', alpha, V)
+        out = torch.einsum("n b t, n b t d -> b t d", alpha, V)
         return out
 
     def get_alpha(self, layer_outputs: list[torch.Tensor]) -> torch.Tensor:
         """Return depth attention weights without aggregation. For analysis."""
         V = torch.stack(layer_outputs, dim=0)
         K = self.key_norm(V)
-        logits = torch.einsum('d, n b t d -> n b t', self.w, K) * self.scale
+        logits = torch.einsum("d, n b t d -> n b t", self.w, K)
         return torch.softmax(logits, dim=0)  # (N, B, T)
