@@ -5,6 +5,9 @@ Usage:
     modal run modal_train.py --variant baseline
     modal run modal_train.py --variant full_attnres
     modal run modal_train.py --variant block_attnres
+    modal run modal_train.py --variant adaptive_attnres
+    modal run modal_train.py --variant value_residual
+    modal run modal_train.py --variant value_residual_only
 """
 
 import modal
@@ -27,12 +30,18 @@ VARIANT_TO_CONFIG = {
     "baseline": "config/train_attnres_baseline.py",
     "full_attnres": "config/train_attnres_full.py",
     "block_attnres": "config/train_attnres_block.py",
+    "adaptive_attnres": "config/train_adaptive_boundaries.py",
+    "value_residual": "config/train_value_residual.py",
+    "value_residual_only": "config/train_value_residual_only.py",
 }
 
 VARIANT_TO_OUTDIR = {
     "baseline": "out-attnres-baseline",
     "full_attnres": "out-attnres-full",
     "block_attnres": "out-attnres-block",
+    "adaptive_attnres": "out-adaptive-boundaries",
+    "value_residual": "out-value-residual",
+    "value_residual_only": "out-value-residual-only",
 }
 
 
