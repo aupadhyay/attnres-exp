@@ -2,8 +2,8 @@
 Fetch all training data from wandb for the attnres project.
 
 Usage:
-    uv run python analysis/fetch_wandb.py
-    uv run python analysis/fetch_wandb.py --project attnres --out analysis/wandb_data
+    uv run python analyze/fetch_wandb.py
+    uv run python analyze/fetch_wandb.py --project attnres --out analyze/wandb_data
 
 Outputs:
     - wandb_data/runs_summary.json  — summary stats per run
@@ -182,7 +182,7 @@ def main():
     parser = argparse.ArgumentParser(description="Fetch wandb data for attnres experiments")
     parser.add_argument("--project", default="attnres")
     parser.add_argument("--entity", default=None)
-    parser.add_argument("--out", default="analysis/wandb_data")
+    parser.add_argument("--out", default="analyze/wandb_data")
     args = parser.parse_args()
 
     out_dir = Path(args.out)

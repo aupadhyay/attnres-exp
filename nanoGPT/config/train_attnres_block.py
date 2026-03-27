@@ -3,7 +3,7 @@
 
 wandb_log = True
 wandb_project = 'attnres'
-wandb_run_name = 'block-attnres-n4'
+wandb_run_name = 'block-attnres-n4-v2'
 
 out_dir = 'out-attnres-block'
 

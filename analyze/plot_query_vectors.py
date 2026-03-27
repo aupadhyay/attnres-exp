@@ -37,9 +37,13 @@ def plot_cosine_similarity(vectors: np.ndarray, output_path: str, title: str = "
     normed = vectors / norms
     cos_sim = normed @ normed.T
 
+    # Mask upper triangle (matrix is symmetric, only show lower half)
     n = len(vectors)
+    mask = np.triu(np.ones_like(cos_sim, dtype=bool), k=1)
+    cos_sim_masked = np.where(mask, np.nan, cos_sim)
+
     fig, ax = plt.subplots(figsize=(8, 7))
-    im = ax.imshow(cos_sim, cmap="RdBu_r", vmin=-1, vmax=1)
+    im = ax.imshow(cos_sim_masked, cmap="RdBu_r", vmin=-1, vmax=1)
     ax.set_xticks(range(n))
     ax.set_yticks(range(n))
     ax.set_xticklabels([f"L{i+1}" for i in range(n)])

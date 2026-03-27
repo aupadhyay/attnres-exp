@@ -8,4 +8,5 @@ __pycache__/
 .pytest_cache/
 wandb/
 docs/superpowers/
-analysis/wandb_data/
+analyze/wandb_data/
+data

@@ -20,7 +20,7 @@ image = (
     .run_commands("pip install uv")
     .run_commands(
         "uv pip install --system "
-        "torch==2.2.0 numpy tiktoken datasets transformers wandb tqdm requests"
+        "torch numpy tiktoken datasets transformers wandb tqdm requests"
     )
 )
 
@@ -104,8 +104,9 @@ def train(variant: str = "baseline"):
 
 @app.function(
     image=image,
-    timeout=60 * 60,
+    timeout=2 * 60 * 60,
     volumes={"/data": vol},
+    secrets=[modal.Secret.from_name("hf-secret")],
 )
 def prepare_data():
     """One-time data preparation."""

@@ -7,7 +7,7 @@ Produces:
 3. Summary table for the blog
 
 Usage:
-    uv run python analysis/fetch_value_residual.py
+    uv run python analyze/fetch_value_residual.py
 """
 
 import csv
@@ -22,7 +22,7 @@ import numpy as np
 import wandb
 
 
-OUT_DIR = Path("analysis/wandb_data/value_residual")
+OUT_DIR = Path("analyze/wandb_data/value_residual")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # The 4 runs we care about for the blog comparison
