@@ -73,13 +73,12 @@ def plot_per_token(tokens: list[str], alphas: list[np.ndarray], output_path: str
         alphas = [a[:, :max_tokens] for a in alphas]
         T = max_tokens
 
-    # Use gridspec to put colorbar on the right without stealing subplot space
-    fig = plt.figure(figsize=(max(14, T * 0.4), n_layers * 2.0))
-    gs = fig.add_gridspec(n_layers, 2, width_ratios=[1, 0.02], hspace=0.4)
+    fig, axes = plt.subplots(n_layers, 1, figsize=(max(14, T * 0.4), n_layers * 2.0))
+    if n_layers == 1:
+        axes = [axes]
 
-    axes = []
     for i in range(n_layers):
-        ax = fig.add_subplot(gs[i, 0])
+        ax = axes[i]
         alpha = alphas[i]
         n_sources = alpha.shape[0]
         im = ax.imshow(alpha, aspect='auto', cmap='viridis', vmin=0, vmax=1)
@@ -95,17 +94,18 @@ def plot_per_token(tokens: list[str], alphas: list[np.ndarray], output_path: str
 
         if i < n_layers - 1:
             ax.set_xticks([])
-        axes.append(ax)
 
     # Token labels on bottom axis only
     axes[-1].set_xticks(range(T))
     axes[-1].set_xticklabels(tokens, rotation=45, ha='right', fontsize=9)
 
-    # Colorbar in its own column
-    cbar_ax = fig.add_subplot(gs[:, 1])
-    fig.colorbar(im, cax=cbar_ax, label="alpha weight")
+    # Colorbar tucked against the plots
+    fig.colorbar(im, ax=axes, shrink=0.8, pad=0.02)
 
-    fig.suptitle(title or "Per-Token Depth Attention", fontsize=14, y=1.01)
+    # Center title over the heatmap axes, not the full figure
+    left = axes[0].get_position().x0
+    right = axes[0].get_position().x1
+    fig.suptitle(title or "Per-Token Depth Attention", fontsize=14, x=(left + right) / 2, y=0.95)
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     print(f"Saved to {output_path}")
 

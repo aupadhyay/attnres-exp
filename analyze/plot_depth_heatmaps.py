@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-def plot_heatmap(npz_path: str, output_path: str, title: str = ""):
+def plot_heatmap(npz_path: str, output_path: str, title: str = "", prefix: str = "L"):
     data = np.load(npz_path, allow_pickle=True)
     n_layers = int(data["n_layers"])
 
@@ -22,19 +22,20 @@ def plot_heatmap(npz_path: str, output_path: str, title: str = ""):
         alphas = data[f"layer_{i}"]
         matrix[i, :len(alphas)] = alphas
 
+    unit = "Block" if prefix == "B" else "Layer"
     fig, ax = plt.subplots(1, 1, figsize=(12, 8))
     sns.heatmap(
         matrix,
         ax=ax,
         cmap="viridis",
-        xticklabels=["emb"] + [f"L{i+1}" for i in range(max_sources - 1)],
-        yticklabels=[f"L{i+1}" for i in range(n_layers)],
+        xticklabels=["emb"] + [f"{prefix}{i+1}" for i in range(max_sources - 1)],
+        yticklabels=[f"{prefix}{i+1}" for i in range(n_layers)],
         vmin=0,
         annot=True if n_layers <= 12 else False,
         fmt=".2f",
     )
-    ax.set_xlabel("Source Layer")
-    ax.set_ylabel("Target Layer")
+    ax.set_xlabel(f"Source {unit}")
+    ax.set_ylabel(f"Target {unit}")
     ax.set_title(title or "Depth Attention Weights (alpha)")
     fig.tight_layout()
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
@@ -46,7 +47,8 @@ if __name__ == "__main__":
     parser.add_argument("--input", required=True, help=".npz from extract_depth_attention.py")
     parser.add_argument("--output", default="figures/depth_heatmap.png")
     parser.add_argument("--title", default="")
+    parser.add_argument("--prefix", default="L", help="Label prefix: L for layers, B for blocks")
     args = parser.parse_args()
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    plot_heatmap(args.input, args.output, args.title)
+    plot_heatmap(args.input, args.output, args.title, args.prefix)
