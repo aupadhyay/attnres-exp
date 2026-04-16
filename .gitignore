@@ -10,3 +10,8 @@ wandb/
 docs/superpowers/
 analyze/wandb_data/
 data
+
+# Remotion / Node
+viz/node_modules/
+viz/out/
+viz/.cache/
